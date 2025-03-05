@@ -6,7 +6,7 @@ import websockets
 import json
 import tkinter as tk
 from threading import Thread
-from tkinter import messagebox
+from tkinter import scrolledtext
 
 def decay_needs():
     while True:
@@ -435,54 +435,95 @@ while True:
         def __init__(self, root):
             self.root = root
             self.root.title("Global Chat")
-        
-            self.text_area = tk.Text(root, state=tk.DISABLED, height=20, width=50)
-            self.text_area.pack()
-        
+
+            self.text_area = scrolledtext.ScrolledText(root, state=tk.DISABLED, height=20, width=50)
+            self.text_area.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
             self.entry = tk.Entry(root, width=50)
-            self.entry.pack()
+            self.entry.pack(padx=10, pady=5, fill=tk.X)
             self.entry.bind("<Return>", self.send_message)
-        
+
+            self.send_button = tk.Button(root, text="Send", command=self.send_message)
+            self.send_button.pack(pady=5)
+
             self.username = None
             self.websocket = None
-    
+            self.running = True  # Track if chat is running
+
+            self.loop = asyncio.new_event_loop()  # Create a new event loop
+            self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        def start_websocket_thread(self):
+            """Starts the WebSocket connection in a separate thread."""
+            thread = Thread(target=self.run_websocket, daemon=True)
+            thread.start()
+
+        def run_websocket(self):
+            """Runs the WebSocket connection in a separate event loop."""
+            asyncio.set_event_loop(self.loop)  # Set the event loop for this thread
+            self.loop.run_until_complete(self.connect())
+
         async def connect(self):
-            self.websocket = await websockets.connect("ws://localhost:8000/ws")
-            self.username = input("Enter your username: ")
-            await self.websocket.send(json.dumps({"username": self.username, "message": "HAS ENTERED THE CHAT"}))
-        
-            receive_task = asyncio.create_task(self.receive_messages())
-            await receive_task
+            """Handles WebSocket connection and message reception."""
+            try:
+                self.websocket = await websockets.connect("ws://localhost:8000/ws")
+                self.username = input("Enter your username: ")
 
-        async def receive_messages(self):
-            while True:
-                try:
+                # Send join message
+                await self.websocket.send(json.dumps({"username": self.username, "message": "HAS ENTERED THE CHAT"}))
+
+                # Start receiving messages
+                while self.running:
                     response = await self.websocket.recv()
-                    self.display_message(response)
-                except websockets.exceptions.ConnectionClosed:
-                    break
-
+                    self.loop.call_soon_threadsafe(self.root.after, 0, self.display_message, response)
+            except Exception as e:
+                self.loop.call_soon_threadsafe(self.root.after, 0, self.display_message, f"Connection error: {e}")
+                
         def display_message(self, message):
+            """Displays a message in the chat window."""
             self.text_area.config(state=tk.NORMAL)
             self.text_area.insert(tk.END, message + "\n")
             self.text_area.config(state=tk.DISABLED)
-        
-        def send_message(self, event):
+            self.text_area.yview(tk.END)
+
+        def send_message(self, event=None):
+            """Handles sending messages to the server."""
             message = self.entry.get()
             self.entry.delete(0, tk.END)
-            if message.lower() == "exit":
-                asyncio.run(self.websocket.send(json.dumps({"username": self.username, "message": "HAS LEFT THE CHAT"})))
-                self.root.destroy()
-            else:
-                asyncio.run(self.websocket.send(json.dumps({"username": self.username, "message": message})))
+
+            if message:
+                self.loop.call_soon_threadsafe(asyncio.create_task, self._send_message_async(message))
+
+        async def _send_message_async(self, message):
+            """Sends a message asynchronously."""
+            if self.websocket:
+                await self.websocket.send(json.dumps({"username": self.username, "message": message}))
+
+        def on_close(self):
+            """Handles cleanup when the chat window is closed and returns to main menu."""
+            self.running = False
+            if self.websocket:
+                self.loop.call_soon_threadsafe(asyncio.create_task, self.websocket.send(
+                    json.dumps({"username": self.username, "message": "HAS LEFT THE CHAT"})
+                ))
+                self.loop.call_soon_threadsafe(asyncio.create_task, self.websocket.close())
+
+            self.root.quit()  # Stop the Tkinter event loop
+            self.root.destroy()  # Close the window
+
 
     def open_chat():
+        """Opens the chat interface and ensures it returns to the main menu when closed."""
         root = tk.Tk()
         client = ChatClient(root)
-        thread = Thread(target=lambda: asyncio.run(client.connect()), daemon=True)
-        thread.start()
-        root.mainloop()
 
-# Modify your main menu logic
+        # Start WebSocket in a separate thread
+        client.start_websocket_thread()
+
+        root.mainloop()  # Wait for chat window to close
+        print("\nReturning to MAIN MENU...\n")  # Debugging statement
+
     if hubchoice == "8":
-        open_chat()
+        print("Opening chat...")  # Debugging statement
+        open_chat()  # Run chat
+        continue  # Return to the main menu when chat closes
